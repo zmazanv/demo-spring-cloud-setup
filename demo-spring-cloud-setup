@@ -1,0 +1,167 @@
+#!/usr/bin/env -S bash -eu
+
+__CWD="$(realpath "$(dirname "$0")")"
+__CLIENT_DIR="${__CWD}/config-client"
+__SERVER_DIR="${__CWD}/config-server"
+__CONFIGS_DIR="${__CWD}/configs"
+
+__CLIENT_CONFIG_CONTENT='spring:
+  application:
+    name: config-client
+  config:
+    import: "configserver:"
+'
+__SERVER_CONFIG_CONTENT="server:
+  port: 8888
+spring:
+  application:
+    name: config-server
+  cloud:
+    config:
+      server:
+        git:
+          uri: file:///${__CWD}/configs
+"
+__CLIENT_MAIN_CLASS_CONTENT='package com.example.config_client;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.context.config.annotation.RefreshScope;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+@SpringBootApplication
+@RestController
+@RefreshScope
+@EnableScheduling
+public class ConfigClientApplication {
+	@Value("${message:Default missing}")
+	private String message;
+
+	@GetMapping("/message")
+	public String getMessage() {
+		return this.message;
+	}
+
+	public static void main(String[] args) {
+		SpringApplication.run(ConfigClientApplication.class, args);
+	}
+}
+
+@Component
+class Refresher {
+	private final RestTemplate restTemplate = new RestTemplate();
+
+	@Scheduled(fixedDelayString = "${config.scheduler.fixedDelay}")
+	public void refreshConfig() {
+            String refreshEndpoint = "http://localhost:8080/actuator/refresh";
+            try {
+                HttpHeaders headers = new HttpHeaders();
+                headers.set("Content-Type", "application/json");
+                HttpEntity<String> entity = new HttpEntity<>("{}", headers);
+                
+                ResponseEntity<String> response = restTemplate.exchange(refreshEndpoint, HttpMethod.POST, entity, String.class);
+                if (response.getStatusCode().is2xxSuccessful()) {
+                    System.out.println("Config refresh successful");
+                } else {
+                    System.out.println("Config refresh failed: " + response.getStatusCode());
+                }
+            } catch (Exception e) {
+                System.err.println("Error refreshing config: " + e.getMessage());
+            }
+        }
+}
+'
+__SERVER_MAIN_CLASS_CONTENT='package com.example.config_server;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.config.server.EnableConfigServer;
+
+@SpringBootApplication
+@EnableConfigServer
+public class ConfigServerApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(ConfigServerApplication.class, args);
+	}
+
+}
+'
+
+__CONFIG_CONTENT='message: "Hello there, Anakin. Once again. Then again. Another time. Greetings."
+config:
+  scheduler:
+    fixedDelay: 1000
+management:
+  endpoints:
+    web:
+      exposure:
+        include: refresh,health,info
+'
+
+__MAKEFILE_CONTENT='.PHONY: run
+
+run:
+	@mvn spring-boot:run
+'
+
+__CLIENT_TEMPLATE_URL='https://start.spring.io/starter.zip?type=maven-project&language=java&platformVersion=3.3.0&packaging=jar&jvmVersion=17&groupId=com.example&artifactId=config-client&name=config-client&description=Spring%20Cloud%20Config%20Client%20Demo&packageName=com.example.config-client&dependencies=web,actuator,cloud-config-client'
+__SERVER_TEMPLATE_URL='https://start.spring.io/starter.zip?type=maven-project&language=java&platformVersion=3.3.0&packaging=jar&jvmVersion=17&groupId=com.example&artifactId=config-server&name=config-server&description=Spring%20Cloud%20Config%20Server%20Demo&packageName=com.example.config-server&dependencies=web,actuator,cloud-config-server'
+
+for i in "${__CLIENT_DIR}" "${__SERVER_DIR}" "${__CONFIGS_DIR}"; do
+        [[ ! -f "${i}" ]] && break
+
+        while :; do sleep 3 && curl -X GET 'http://localhost:8080/message' && echo; done
+        exit 0
+done
+
+mkdir -p "${__CLIENT_DIR}" "${__SERVER_DIR}" "${__CONFIGS_DIR}"
+
+curl -o "${__CLIENT_DIR}/starter.zip" -- "${__CLIENT_TEMPLATE_URL}"
+curl -o "${__SERVER_DIR}/starter.zip" -- "${__SERVER_TEMPLATE_URL}"
+
+for i in "${__CLIENT_DIR}" "${__SERVER_DIR}"; do
+        (
+                cd -- "${i}"
+                unzip -- 'starter.zip'
+                rm -v -- 'starter.zip'
+        )
+done
+
+__CLIENT_CONFIG="$(find "${__CLIENT_DIR}" -type 'f' -regextype 'posix-extended' -regex '.*/application\.properties$')"
+__SERVER_CONFIG="$(find "${__SERVER_DIR}" -type 'f' -regextype 'posix-extended' -regex '.*/application\.properties$')"
+__CLIENT_MAIN_CLASS="$(grep -lr '^@SpringBootApplication$' "${__CLIENT_DIR}")"
+__SERVER_MAIN_CLASS="$(grep -lr '^@SpringBootApplication$' "${__SERVER_DIR}")"
+
+echo "${__CLIENT_CONFIG_CONTENT}" >"${__CLIENT_CONFIG}"
+echo "${__SERVER_CONFIG_CONTENT}" >"${__SERVER_CONFIG}"
+echo "${__CLIENT_MAIN_CLASS_CONTENT}" >"${__CLIENT_MAIN_CLASS}"
+echo "${__SERVER_MAIN_CLASS_CONTENT}" >"${__SERVER_MAIN_CLASS}"
+echo "${__CONFIG_CONTENT}" >"${__CONFIGS_DIR}/application.yml"
+
+mv -v "${__CLIENT_CONFIG}" "${__CLIENT_CONFIG/%properties/yml}"
+mv -v "${__SERVER_CONFIG}" "${__SERVER_CONFIG/%properties/yml}"
+
+for i in "${__CLIENT_DIR}" "${__SERVER_DIR}"; do
+        echo "${__MAKEFILE_CONTENT}" >"${i}/Makefile"
+done
+
+for i in "${__CLIENT_DIR}" "${__SERVER_DIR}" "${__CONFIGS_DIR}"; do
+        (
+                cd -- "${i}"
+                git init
+                git add -A
+                git commit -m 'Initial commit'
+        )
+
+done
